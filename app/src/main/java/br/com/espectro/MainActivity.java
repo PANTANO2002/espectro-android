@@ -404,9 +404,17 @@ public final class MainActivity extends Activity {
         message.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
         message.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(2000)});
         LinearLayout panel = column(); panel.setPadding(dp(22), dp(12), dp(22), dp(12));
-        panel.addView(text("Cria um arquivo .txt para o compartilhamento do Android. Escolha Bluetooth se disponível e selecione o destino. O receptor precisa aceitar e suportar arquivos; não precisa do Espectro. Detectar um sinal não garante que ele receba arquivos. Este recurso não substitui um serviço de emergência.", 12, MUTED)); panel.addView(message);
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Compartilhar recado").setView(panel).setPositiveButton("Escolher destino", null).setNegativeButton("Cancelar", null).create();
-        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+        panel.addView(text("Compartilhe um arquivo .txt pelo Android; Bluetooth exige suporte e aceite do receptor, sem Espectro no destino. Ou prepare um SMS no app de mensagens: você escolhe o número e confirma o envio, que pode ter custo da operadora. Nenhuma opção força um alerta na tela. Este recurso não substitui um serviço de emergência.", 12, MUTED)); panel.addView(message);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Compartilhar recado").setView(panel).setPositiveButton("Arquivo / Bluetooth", null).setNeutralButton("Preparar SMS", null).setNegativeButton("Cancelar", null).create();
+        dialog.setOnShowListener(d -> {
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+                if (message.getText().toString().trim().isEmpty()) { message.setError("Escreva o recado"); return; }
+                try {
+                    startActivity(new Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:")).putExtra("sms_body", message.getText().toString()));
+                    dialog.dismiss();
+                } catch (ActivityNotFoundException e) { Toast.makeText(this, "Nenhum aplicativo de SMS disponível.", Toast.LENGTH_LONG).show(); }
+            });
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
             if (message.getText().toString().trim().isEmpty()) { message.setError("Escreva o recado"); return; }
             try {
                 Uri uri = MessageShareProvider.create(this, message.getText().toString());
@@ -415,7 +423,8 @@ public final class MainActivity extends Activity {
                 send.setClipData(ClipData.newRawUri("Recado Espectro", uri));
                 startActivity(Intent.createChooser(send, "Enviar recado com…")); dialog.dismiss();
             } catch (IOException | ActivityNotFoundException e) { Toast.makeText(this, "Não foi possível abrir o compartilhamento.", Toast.LENGTH_LONG).show(); }
-        })); dialog.show();
+            });
+        }); dialog.show();
     }
     private void calibrate(Finding f) {
         new AlertDialog.Builder(this).setTitle("Referência a 1 metro")
