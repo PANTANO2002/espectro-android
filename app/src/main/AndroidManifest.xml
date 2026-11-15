@@ -27,6 +27,7 @@
         android:supportsRtl="true" android:usesCleartextTraffic="false">
         <service android:name=".UpdateJobService" android:exported="true" android:permission="android.permission.BIND_JOB_SERVICE" />
         <provider android:name=".UpdateApkProvider" android:authorities="${applicationId}.updates" android:exported="false" android:grantUriPermissions="true" />
+        <provider android:name=".MessageShareProvider" android:authorities="${applicationId}.recados" android:exported="false" android:grantUriPermissions="true" />
         <activity android:name=".MainActivity" android:exported="true" android:configChanges="orientation|screenSize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
