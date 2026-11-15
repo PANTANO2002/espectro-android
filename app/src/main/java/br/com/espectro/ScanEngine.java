@@ -21,7 +21,7 @@ import android.telephony.*;
 import org.json.*;
 import java.util.*;
 
-/** Foreground, bounded observation of public APIs. All stored state lives on the main thread. */
+/** Foreground continuous observation. All stored state lives on the main thread. */
 @SuppressLint("MissingPermission")
 final class ScanEngine {
     final LinkedHashMap<String, Finding> findings = new LinkedHashMap<>();
@@ -56,6 +56,9 @@ final class ScanEngine {
     private long lastRttMs;
     private int generation;
     private final Runnable classicWatchdogTask = this::classicWatchdog;
+    private long beganElapsed, lastNewElapsed, lastWifiSweep, lastCellSweep;
+    private boolean monitoring, bleHealthy;
+    private final HashSet<String> bleSeen = new HashSet<>(), classicSeen = new HashSet<>();
 
     ScanEngine(Activity activity, int seconds, Runnable changed) {
         this.activity = activity;
@@ -82,14 +85,16 @@ final class ScanEngine {
         hardware.put("Câmera e microfone", "Não acionados nesta versão. Não identificam emissores de rádio.");
         hardware.put("Direção", "Indisponível para aparelhos. A bússola mede a orientação do celular, não a direção de um emissor.");
         hardware.put("Identificação", "Nomes são anunciados pelos próprios aparelhos. Endereços podem mudar; um aparelho pode gerar vários resultados.");
+        hardware.put("Distância RSSI", "Modelo experimental com n=2,5. Referência assumida a 1 m: Wi-Fi 2,4 GHz −45 dBm; 5/6 GHz −50 dBm; Bluetooth −59 dBm. Calibre um emissor conhecido a 1 m para reduzir o erro. Paredes, antenas e potência podem causar erros grandes.");
     }
 
     void start() {
         if (running) return;
         running = true;
         startedAt = System.currentTimeMillis();
-        deadline = SystemClock.elapsedRealtime() + durationMs;
-        note("Varredura iniciada por " + durationMs / 1000 + " s.");
+        beganElapsed = lastNewElapsed = SystemClock.elapsedRealtime();
+        deadline = beganElapsed + durationMs;
+        note("Busca completa iniciada; depois, acompanhamento até parar. Atualização a cada " + durationMs / 1000 + " s.");
         IntentFilter filter = new IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION);
         filter.addAction(BluetoothDevice.ACTION_FOUND);
         filter.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
@@ -107,21 +112,47 @@ final class ScanEngine {
         startGnss();
         readUsb();
         // BLE and classic inquiry share a controller. Divide the session into two phases.
-        main.postDelayed(this::classicPhase, Math.min(20000L, durationMs / 2));
+        main.postDelayed(this::classicPhase, 20000L);
         main.postDelayed(this::tick, 250);
-        main.postDelayed(this::refreshWifi, 35000);
-        main.postDelayed(this::refreshCells, 30000);
+        main.postDelayed(this::refreshWifi, durationMs);
         changed.run();
     }
 
     private void tick() {
         if (!running) return;
-        if (SystemClock.elapsedRealtime() >= deadline) { stop("Tempo concluído"); return; }
+        long now = SystemClock.elapsedRealtime();
+        boolean quiet = SignalPolicy.monitoring(now - beganElapsed, now - lastNewElapsed);
+        if (quiet != monitoring) { monitoring = quiet; note(quiet ? "Sem novas identidades; acompanhamento periódico ativo." : "Novos sinais observados; ampliando a busca."); }
+        for (Finding f : findings.values()) if (f.key.startsWith("nfc:") && f.ageMs() > Math.max(90000, durationMs * 3)) {
+            f.active = false; f.presence = "Leitura NFC antiga; aproxime novamente";
+        }
         changed.run();
         main.postDelayed(this::tick, 650);
     }
 
     int secondsLeft() { return running ? (int)Math.max(0, (deadline - SystemClock.elapsedRealtime() + 999) / 1000) : 0; }
+    boolean monitoring() { return monitoring; }
+    Collection<Finding> visible() { ArrayList<Finding> out = new ArrayList<>(); for (Finding f : findings.values()) if (f.active) out.add(f); return out; }
+
+    private void sweep(String method, Set<String> observed, boolean immediate) {
+        for (Finding f : findings.values()) if (f.methods.contains(method)) {
+            if (observed.contains(f.key)) { f.misses.put(method, 0); continue; }
+            int missed = f.misses.getOrDefault(method, 0) + 1; f.misses.put(method, missed);
+            boolean allMissed = true;
+            for (String source : f.methods) if (f.misses.getOrDefault(source, 0) < 3) allMissed = false;
+            if (immediate || allMissed && SignalPolicy.absent(f.ageMs(), missed, durationMs)) {
+                f.active = false; f.presence = "Sem reobservação em buscas concluídas";
+            }
+        }
+    }
+
+    private void timestamp(Finding f, long measuredAt) {
+        long now = SystemClock.elapsedRealtime();
+        measuredAt = Math.max(0, Math.min(now, measuredAt));
+        f.sourceAgeMs = 0; f.lastSeenElapsed = measuredAt;
+        f.lastSeen = System.currentTimeMillis() - (now - measuredAt);
+        if (now - measuredAt > Math.max(90000, durationMs * 3)) { f.active = false; f.presence = "Cache antigo; aguardando nova observação"; }
+    }
 
     private Finding find(String key, String name, String kind, String method) {
         Finding f = findings.get(key);
@@ -129,6 +160,7 @@ final class ScanEngine {
             if (findings.size() >= 2000) return null;
             f = new Finding(key, name, kind, method);
             findings.put(key, f);
+            lastNewElapsed = SystemClock.elapsedRealtime();
         } else {
             f.methods.add(method);
             if (name != null && !name.isEmpty() && !name.startsWith("Sem nome")) f.name = name;
@@ -136,6 +168,9 @@ final class ScanEngine {
         f.lastSeen = System.currentTimeMillis();
         f.lastSeenElapsed = SystemClock.elapsedRealtime();
         f.observations++;
+        if (!f.active) lastNewElapsed = SystemClock.elapsedRealtime();
+        f.active = true; f.presence = "Observado"; f.sourceAgeMs = 0;
+        for (String source : f.methods) f.misses.put(source, 0);
         return f;
     }
 
@@ -145,7 +180,7 @@ final class ScanEngine {
             String action = intent.getAction();
             try {
                 if (WifiManager.SCAN_RESULTS_AVAILABLE_ACTION.equals(action)) {
-                    readWifi();
+                    readWifi(intent.getBooleanExtra(WifiManager.EXTRA_RESULTS_UPDATED, false));
                 } else if (BluetoothDevice.ACTION_FOUND.equals(action)) {
                     if (!classicRequested) return;
                     BluetoothDevice d = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
@@ -153,8 +188,9 @@ final class ScanEngine {
                 } else if (BluetoothAdapter.ACTION_DISCOVERY_FINISHED.equals(action) && classicRequested) {
                     state("Bluetooth clássico", "Busca concluída; somente aparelhos em modo visível respondem");
                     classicRequested = false;
+                    sweep("Bluetooth clássico", classicSeen, false);
                     resumeBlePhase();
-                } else if (WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION.equals(action)) requestPeers();
+                } else if (WifiP2pManager.WIFI_P2P_PEERS_CHANGED_ACTION.equals(action)) requestPeers(true);
             } catch (RuntimeException e) { note("Atualização bloqueada: " + e.getClass().getSimpleName()); }
         }
     };
@@ -165,7 +201,7 @@ final class ScanEngine {
         if (!allowed(Manifest.permission.ACCESS_FINE_LOCATION)) { state("Wi-Fi", "Permissão de localização precisa necessária"); return; }
         try {
             if (!wifi.isWifiEnabled()) { state("Wi-Fi", "Ative o Wi-Fi nas configurações"); return; }
-            readWifi();
+            readWifi(false);
             state("Wi-Fi", wifi.startScan() ? "Buscando pontos de acesso" : "Solicitação limitada pelo Android; cache sinalizado nos resultados");
         } catch (RuntimeException e) { state("Wi-Fi", "Indisponível: verifique localização e permissões"); }
     }
@@ -173,19 +209,36 @@ final class ScanEngine {
     private void refreshWifi() {
         if (!running) return;
         startWifi();
-        main.postDelayed(this::refreshWifi, 35000);
+        readCells(); readUsb();
+        if (p2p == null || p2pChannel == null) startP2p();
+        else try { p2p.discoverPeers(p2pChannel, new WifiP2pManager.ActionListener() {
+            @Override public void onSuccess() { if (running) requestPeers(); }
+            @Override public void onFailure(int code) { if (running) state("Wi-Fi Direct", "Atualização indisponível (" + code + "); mantendo cache"); }
+        }); } catch (RuntimeException ignored) { }
+        if (discoveries.isEmpty()) startNsd();
+        if (nfc == null || !nfc.isEnabled()) startNfc();
+        deadline = SystemClock.elapsedRealtime() + durationMs;
+        main.postDelayed(this::refreshWifi, durationMs);
     }
 
-    private void readWifi() {
+    private void readWifi(boolean fresh) {
         if (wifi == null || !running) return;
         List<android.net.wifi.ScanResult> results = wifi.getScanResults();
+        HashSet<String> observed = new HashSet<>();
+        long newest = 0;
         for (android.net.wifi.ScanResult r : results) {
             if (r.BSSID == null || r.BSSID.isEmpty()) continue;
             String name = r.SSID == null || r.SSID.isEmpty() ? "Rede sem nome anunciado" : r.SSID;
-            Finding f = find("wifi:" + r.BSSID, name, "Ponto de acesso / hotspot", "Wi-Fi");
+            String key = "wifi:" + r.BSSID;
+            long measuredAt = r.timestamp / 1000;
+            newest = Math.max(newest, measuredAt);
+            if (SystemClock.elapsedRealtime() - measuredAt < Math.max(35000, durationMs)) observed.add(key);
+            Finding previous = findings.get(key);
+            if (previous != null && measuredAt <= previous.lastSeenElapsed) continue;
+            Finding f = find(key, name, "Ponto de acesso / hotspot", "Wi-Fi");
             if (f == null) continue;
-            f.rssi = r.level;
-            f.sourceAgeMs = Math.max(0, SystemClock.elapsedRealtime() - r.timestamp / 1000);
+            f.sample(r.level, measuredAt);
+            timestamp(f, measuredAt);
             f.details = r.frequency + " MHz · " + r.BSSID + "\n" + r.capabilities;
             f.identifiers.put("BSSID / MAC", r.BSSID);
             f.identifiers.put("SSID", name);
@@ -194,11 +247,15 @@ final class ScanEngine {
             f.identifiers.put("Segurança anunciada", r.capabilities);
             if (Build.VERSION.SDK_INT >= 30) f.identifiers.put("Padrão Wi-Fi (código Android)", String.valueOf(r.getWifiStandard()));
         }
+        long now = SystemClock.elapsedRealtime();
+        if (fresh && now - lastWifiSweep >= 30000 && (results.isEmpty() || newest > lastWifiSweep)) {
+            sweep("Wi-Fi", observed, false); lastWifiSweep = now;
+        }
         rangeWifi(results);
     }
 
     private void rangeWifi(List<android.net.wifi.ScanResult> results) {
-        if (Build.VERSION.SDK_INT < 28 || !feature("android.hardware.wifi.rtt")) { state("Wi-Fi RTT", "Sem suporte anunciado; distância em metros indisponível"); return; }
+        if (Build.VERSION.SDK_INT < 28 || !feature("android.hardware.wifi.rtt")) { state("Wi-Fi RTT", "Sem suporte anunciado; usando apenas estimativa experimental RSSI"); return; }
         WifiRttManager manager = (WifiRttManager)activity.getSystemService(Context.WIFI_RTT_RANGING_SERVICE);
         if (manager == null || !manager.isAvailable()) { state("Wi-Fi RTT", "Indisponível no estado atual do rádio"); return; }
         if (rttPending || (lastRttMs != 0 && SystemClock.elapsedRealtime() - lastRttMs < 20000)) return;
@@ -223,6 +280,7 @@ final class ScanEngine {
                         f.distanceMeters = r.getDistanceMm() / 1000.0;
                         f.distanceErrorMeters = r.getDistanceStdDevMm() / 1000.0;
                         f.distanceMethod = "Wi-Fi RTT IEEE 802.11mc";
+                        f.rttElapsed = SystemClock.elapsedRealtime();
                         measured++;
                     }
                     state("Wi-Fi RTT", measured + " distância(s) medida(s); sem informação de direção");
@@ -244,20 +302,25 @@ final class ScanEngine {
         } catch (RuntimeException e) { state("Wi-Fi Direct", "Verifique Wi-Fi, localização e permissão de dispositivos próximos"); }
     }
 
-    private void requestPeers() {
+    private void requestPeers() { requestPeers(false); }
+    private void requestPeers(boolean changedList) {
         if (p2p == null || p2pChannel == null) return;
         p2p.requestPeers(p2pChannel, list -> {
             if (!running) return;
+            HashSet<String> peers = new HashSet<>();
             for (WifiP2pDevice d : list.getDeviceList()) {
                 if (d.deviceAddress == null) continue;
+                peers.add("p2p:" + d.deviceAddress);
                 Finding f = find("p2p:" + d.deviceAddress, empty(d.deviceName, "Sem nome anunciado"), "Participante Wi-Fi Direct", "Wi-Fi Direct");
                 if (f != null) {
                     f.sourceAgeMs = -1;
+                    f.presence = "Lista P2P do Android; idade da presença desconhecida";
                     f.identifiers.put("Endereço P2P", d.deviceAddress);
                     f.identifiers.put("Tipo WPS", empty(d.primaryDeviceType, "não informado"));
                     f.details = d.deviceAddress + "\nTipo WPS anunciado: " + empty(d.primaryDeviceType, "não informado") + " · cache do sistema; presença atual não garantida";
                 }
             }
+            if (changedList) sweep("Wi-Fi Direct", peers, true);
         });
     }
 
@@ -269,10 +332,11 @@ final class ScanEngine {
             if (!bluetooth.isEnabled()) { state("Bluetooth LE", "Ative o Bluetooth"); state("Bluetooth clássico", "Ative o Bluetooth"); return; }
             ble = bluetooth.getBluetoothLeScanner();
             if (ble == null) { state("Bluetooth LE", "Scanner indisponível"); return; }
+            bleSeen.clear(); bleHealthy = true;
             bleCallback = new ScanCallback() {
                 @Override public void onScanResult(int type, android.bluetooth.le.ScanResult r) { main.post(() -> { if (running) bluetoothFinding(r.getDevice(), r.getRssi(), r.getScanRecord(), true); }); }
                 @Override public void onBatchScanResults(List<android.bluetooth.le.ScanResult> values) { for (android.bluetooth.le.ScanResult r : values) onScanResult(0, r); }
-                @Override public void onScanFailed(int code) { main.post(() -> { if (running) state("Bluetooth LE", "Falha de varredura (" + code + ")"); }); }
+                @Override public void onScanFailed(int code) { main.post(() -> { bleHealthy = false; bleStarted = false; if (running) state("Bluetooth LE", "Falha de varredura (" + code + ")"); }); }
             };
             ble.startScan(null, new ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), bleCallback);
             bleStarted = true;
@@ -303,7 +367,8 @@ final class ScanEngine {
             f.identifiers.put("MAC Bluetooth", address);
             f.identifiers.put("Tipo de transporte (código Android)", String.valueOf(device.getType()));
             if (c != null) f.identifiers.put("Classe Bluetooth", String.format(Locale.ROOT, "0x%04X", c.getDeviceClass()));
-            if (rssi != Short.MIN_VALUE) f.rssi = rssi;
+            (isBle ? bleSeen : classicSeen).add(f.key);
+            if (rssi != Short.MIN_VALUE) f.sample(rssi, SystemClock.elapsedRealtime());
             String details = address;
             if (record != null) {
                 if (record.getServiceUuids() != null) { details += "\nServiços: " + record.getServiceUuids(); f.identifiers.put("UUIDs de serviço BLE", record.getServiceUuids().toString()); }
@@ -336,12 +401,14 @@ final class ScanEngine {
             if (!bluetooth.isEnabled()) { state("Bluetooth clássico", "Bluetooth desligado"); return; }
             if (bluetooth.isDiscovering()) { state("Bluetooth clássico", "Outra busca já está ativa; tente em uma nova sessão"); return; }
             classicRequested = bluetooth.startDiscovery();
+            classicSeen.clear();
             state("Bluetooth clássico", classicRequested ? "Procurando aparelhos em modo visível" : "Busca não iniciada pelo sistema");
         } catch (RuntimeException e) { state("Bluetooth clássico", "Permissão ou rádio indisponível"); }
     }
 
     private void classicPhase() {
         if (!running) return;
+        try { if (bleStarted && bleHealthy && bluetooth != null && bluetooth.isEnabled()) sweep("Bluetooth LE", bleSeen, false); } catch (RuntimeException ignored) { }
         stopBle();
         startClassic();
         if (classicRequested) main.postDelayed(classicWatchdogTask, 16000);
@@ -389,17 +456,19 @@ final class ScanEngine {
         try {
             TelephonyManager tm = (TelephonyManager)activity.getSystemService(Context.TELEPHONY_SERVICE);
             if (tm == null) return;
-            cellResults(tm.getAllCellInfo());
+            cellResults(tm.getAllCellInfo(), false);
             state("Rede móvel", "Células informadas pelo modem; não detecta outros celulares");
             if (Build.VERSION.SDK_INT >= 29) tm.requestCellInfoUpdate(activity.getMainExecutor(), new TelephonyManager.CellInfoCallback() {
-                @Override public void onCellInfo(List<CellInfo> infos) { if (running) cellResults(infos); }
+                @Override public void onCellInfo(List<CellInfo> infos) { if (running) cellResults(infos, true); }
                 @Override public void onError(int code, Throwable detail) { if (running) state("Rede móvel", "Atualização limitada; dados do modem podem estar em cache"); }
             });
         } catch (RuntimeException e) { state("Rede móvel", "Modem ou permissão indisponível"); }
     }
 
-    private void cellResults(List<CellInfo> infos) {
+    private void cellResults(List<CellInfo> infos, boolean updated) {
         if (infos == null) return;
+        HashSet<String> observed = new HashSet<>();
+        long newest = 0;
         for (CellInfo c : infos) {
             String rat = "", identity = "", operator = "";
             int dbm = Integer.MAX_VALUE;
@@ -422,14 +491,24 @@ final class ScanEngine {
                 if (id.getCid() == Integer.MAX_VALUE) continue;
                 rat = "3G WCDMA"; identity = "CID " + id.getCid() + " · LAC " + id.getLac() + " · PLMN " + id.getMcc() + "/" + id.getMnc(); dbm = v.getCellSignalStrength().getDbm();
             } else continue;
-            Finding f = find("cell:" + rat + ":" + operator + ":" + identity, "Célula " + rat + (c.isRegistered() ? " · em uso" : " · vizinha"), "Infraestrutura de rede móvel", "Modem celular");
+            String key = "cell:" + rat + ":" + operator + ":" + identity;
+            Finding previous = findings.get(key);
+            long measuredAt = c.getTimeStamp() / 1000000;
+            newest = Math.max(newest, measuredAt);
+            if (SystemClock.elapsedRealtime() - measuredAt < Math.max(30000, durationMs)) observed.add(key);
+            if (previous != null && measuredAt <= previous.lastSeenElapsed) continue;
+            Finding f = find(key, "Célula " + rat + (c.isRegistered() ? " · em uso" : " · vizinha"), "Infraestrutura de rede móvel", "Modem celular");
             if (f == null) continue;
             if (dbm != Integer.MAX_VALUE) f.rssi = dbm;
             f.details = operator + "\n" + identity;
             f.identifiers.put("ID da célula", identity);
             f.identifiers.put("Operadora / PLMN", operator);
             f.identifiers.put("Tecnologia de rede", rat);
-            f.sourceAgeMs = Math.max(0, SystemClock.elapsedRealtime() - c.getTimeStamp() / 1000000);
+            timestamp(f, measuredAt);
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (updated && now - lastCellSweep >= 30000 && (infos.isEmpty() || newest > lastCellSweep)) {
+            sweep("Modem celular", observed, false); lastCellSweep = now;
         }
     }
 
@@ -458,7 +537,12 @@ final class ScanEngine {
             @Override public void onDiscoveryStopped(String s) { }
             @Override public void onStartDiscoveryFailed(String s, int code) { main.post(() -> { if (running) note("mDNS " + s + ": indisponível (" + code + ")"); }); }
             @Override public void onStopDiscoveryFailed(String s, int code) { }
-            @Override public void onServiceLost(NsdServiceInfo info) { }
+            @Override public void onServiceLost(NsdServiceInfo info) { main.post(() -> {
+                if (!running) return;
+                String key = info.getServiceName() + "|" + info.getServiceType(); seenServices.remove(key);
+                Finding f = findings.get("lan:" + key);
+                if (f != null) { f.active = false; f.presence = "Serviço retirado da descoberta mDNS"; }
+            }); }
             @Override public void onServiceFound(NsdServiceInfo info) {
                 main.post(() -> {
                     if (!running || seenServices.size() >= 2000) return;
@@ -581,7 +665,9 @@ final class ScanEngine {
         UsbManager manager = (UsbManager)activity.getSystemService(Context.USB_SERVICE);
         if (manager == null) { state("USB", "Indisponível"); return; }
         int total = 0;
+        HashSet<String> connected = new HashSet<>();
         for (UsbDevice d : manager.getDeviceList().values()) {
+            connected.add("usb:" + d.getDeviceName());
             Finding f = find("usb:" + d.getDeviceName(), empty(d.getProductName(), "Dispositivo USB"), "Periférico conectado por cabo", "USB / OTG");
             if (f != null) {
                 f.details = "Fabricante: " + empty(d.getManufacturerName(), "não informado") + "\nVID " + d.getVendorId() + " · PID " + d.getProductId() + " · classe " + d.getDeviceClass();
@@ -592,6 +678,7 @@ final class ScanEngine {
             }
             total++;
         }
+        sweep("USB / OTG", connected, true);
         state("USB", total + " periférico(s) conectado(s); não procura aparelhos sem fio");
     }
 
@@ -624,8 +711,8 @@ final class ScanEngine {
         root.put("app", "Espectro " + BuildConfig.VERSION_NAME).put("estado", running ? "em andamento" : "encerrada")
             .put("celular", Build.MANUFACTURER + " " + Build.MODEL).put("android", Build.VERSION.RELEASE)
             .put("inicio_ms", startedAt).put("fim_ms", endedAt == 0 ? JSONObject.NULL : endedAt)
-            .put("duracao_solicitada_s", durationMs / 1000)
-            .put("nota", "Identificadores e serviços não equivalem a aparelhos físicos únicos. Nomes e classes são anunciados e não verificados. Dados em cache têm idade indicada. Distâncias apenas via Wi-Fi RTT compatível; direção indisponível.")
+            .put("intervalo_atualizacao_s", durationMs / 1000)
+            .put("nota", "Identificadores/serviços não equivalem a aparelhos únicos. RSSI: distância experimental, n=2.5, potência de referência assumida ou calibrada. RTT tem prioridade por 60 s. Direção indisponível. no_radar=false preserva histórico sem reobservação; não prova distância física.")
             .put("modulos", new JSONObject(modules)).put("hardware_e_ultimas_leituras", new JSONObject(hardware))
             .put("registro", new JSONArray(log));
         JSONArray items = new JSONArray();

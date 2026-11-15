@@ -28,10 +28,10 @@ final class ScanHeroView extends View {
         setFocusable(true);
     }
 
-    void update(boolean active, int remaining) {
+    void update(boolean active, int remaining, boolean monitoring) {
         scanning = active; seconds = remaining;
-        subtitle = active ? remaining + " s restantes · observando sinais" : "Toque para explorar os sinais ao redor";
-        setContentDescription(active ? "Parar varredura. " + remaining + " segundos restantes" : "Escanear aparelhos próximos");
+        subtitle = active ? monitoring ? "Acompanhando · atualizar em " + remaining + " s" : "Busca completa · observando sinais" : "Toque para explorar os sinais ao redor";
+        setContentDescription(active ? "Parar acompanhamento de sinais" : "Escanear aparelhos próximos");
         invalidate();
     }
 

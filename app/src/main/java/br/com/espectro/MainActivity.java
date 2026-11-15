@@ -125,7 +125,7 @@ public final class MainActivity extends Activity {
         hero.setOnClickListener(v -> { if (engine != null && engine.running) engine.stop("Interrompida por você"); else requestScan(); });
 
         LinearLayout time = row(); time.setPadding(dp(15), dp(13), dp(15), dp(13)); time.setBackground(shape(SURFACE, BORDER, 14));
-        TextView timeLabel = text("TEMPO DE VARREDURA", 9, MUTED); timeLabel.setLetterSpacing(.08f);
+        TextView timeLabel = text("ATUALIZAR A CADA", 9, MUTED); timeLabel.setLetterSpacing(.08f);
         time.addView(timeLabel, new LinearLayout.LayoutParams(0, -2, 1));
         durationButton = text("60 segundos  ⌄", 13, WHITE); bold(durationButton);
         time.addView(durationButton); time.setOnClickListener(v -> chooseDuration());
@@ -161,7 +161,7 @@ public final class MainActivity extends Activity {
         export = new Button(this); export.setAllCaps(false); export.setText("Salvar relatório  ↓"); export.setTextColor(WHITE); export.setTextSize(13); export.setBackground(shape(SURFACE, BORDER, 13));
         export.setOnClickListener(v -> exportReport()); results.addView(export, lp(-1, 46));
         gap(results, 14);
-        results.addView(text("Resultados são sinais, identidades e serviços observados. Um aparelho pode aparecer mais de uma vez. Intensidade de sinal não informa metros nem direção.", 10, MUTED));
+        results.addView(text("Um aparelho pode gerar vários resultados. Metros por RSSI são estimativas experimentais, afetadas por paredes e potência. O radar não informa direção. Sinais sem reobservação saem da lista e ficam no histórico do relatório.", 10, MUTED));
         content.addView(results, lp(-1, -2));
         gap(content, 28);
         TextView footer = text("SINAIS LOCAIS  /  ATUALIZAÇÕES PELO GITHUB", 8, 0xFF716A7C);
@@ -170,15 +170,15 @@ public final class MainActivity extends Activity {
 
     private void chooseDuration() {
         if (engine != null && engine.running) { Toast.makeText(this, "Altere o tempo após encerrar a busca.", Toast.LENGTH_SHORT).show(); return; }
-        new AlertDialog.Builder(this).setTitle("Tempo de varredura")
-            .setItems(new String[]{"30 segundos", "60 segundos", "2 minutos", "5 minutos", "Personalizar…"}, (dialog, which) -> {
-                if (which < 4) setDuration(new int[]{30, 60, 120, 300}[which]);
+        new AlertDialog.Builder(this).setTitle("Intervalo de atualização")
+            .setItems(new String[]{"35 segundos", "60 segundos", "2 minutos", "5 minutos", "Personalizar…"}, (dialog, which) -> {
+                if (which < 4) setDuration(new int[]{35, 60, 120, 300}[which]);
                 else {
                     EditText field = new EditText(this); field.setInputType(InputType.TYPE_CLASS_NUMBER); field.setText(String.valueOf(duration)); field.setSelectAllOnFocus(true);
-                    AlertDialog custom = new AlertDialog.Builder(this).setTitle("De 15 a 900 segundos").setView(field).setPositiveButton("Aplicar", null).setNegativeButton("Cancelar", null).create();
+                    AlertDialog custom = new AlertDialog.Builder(this).setTitle("De 35 a 900 segundos").setView(field).setPositiveButton("Aplicar", null).setNegativeButton("Cancelar", null).create();
                     custom.setOnShowListener(d -> custom.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-                        try { int value = Integer.parseInt(field.getText().toString()); if (value < 15 || value > 900) throw new NumberFormatException(); setDuration(value); custom.dismiss(); }
-                        catch (NumberFormatException e) { field.setError("Digite um valor de 15 a 900"); }
+                        try { int value = Integer.parseInt(field.getText().toString()); if (value < 35 || value > 900) throw new NumberFormatException(); setDuration(value); custom.dismiss(); }
+                        catch (NumberFormatException e) { field.setError("Digite um valor de 35 a 900"); }
                     })); custom.show();
                 }
             }).show();
@@ -219,8 +219,10 @@ public final class MainActivity extends Activity {
     private void beginScan() {
         if (isFinishing() || isDestroyed()) return;
         if (engine != null && engine.running) engine.stop("Nova sessão");
+        LinkedHashMap<String, Finding> previous = new LinkedHashMap<>(engine.findings);
         cards.clear(); groups.clear(); resultList.removeAllViews(); rendered = 0;
         engine = new ScanEngine(this, duration, this::refresh);
+        engine.findings.putAll(previous);
         engine.start();
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         animateReveal();
@@ -241,30 +243,34 @@ public final class MainActivity extends Activity {
     private void refresh() {
         if (engine == null) return;
         boolean active = engine.running;
-        hero.update(active, engine.secondsLeft());
-        status.setText(active ? "●  VARREDURA EM ANDAMENTO" : engine.startedAt == 0 ? "●  PRONTO PARA ESCANEAR" : "○  VARREDURA ENCERRADA");
-        count.setText(String.valueOf(engine.findings.size()));
-        summary.setText(active ? engine.secondsLeft() + " s restantes · resultados ao vivo" : engine.startedAt == 0 ? "Toque em cada origem para expandir ou recolher." : "Sessão concluída · " + engine.findings.size() + " identificadores e serviços");
+        Collection<Finding> visible = engine.visible();
+        hero.update(active, engine.secondsLeft(), engine.monitoring());
+        status.setText(active ? engine.monitoring() ? "●  ACOMPANHANDO O AMBIENTE" : "●  BUSCA COMPLETA EM ANDAMENTO" : engine.startedAt == 0 ? "●  PRONTO PARA ESCANEAR" : "○  VARREDURA PAUSADA");
+        count.setText(String.valueOf(visible.size()));
+        summary.setText(active ? "Próxima atualização em " + engine.secondsLeft() + " s · " + visible.size() + " no radar / " + engine.findings.size() + " no histórico" : engine.startedAt == 0 ? "Toque em cada origem para expandir ou recolher." : "Busca pausada · resultados preservados nesta abertura do app");
         progress.setVisibility(active ? View.VISIBLE : View.GONE);
         if (active) progress.setProgress((int)(1000 * (1 - engine.secondsLeft() / (double)duration)), true);
         if (!active) getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        empty.setVisibility(engine.findings.isEmpty() ? View.VISIBLE : View.GONE);
+        empty.setVisibility(visible.isEmpty() ? View.VISIBLE : View.GONE);
         empty.setText(active ? "Escutando o ambiente…\nSó aparecem sinais que o Android consegue acessar." : engine.startedAt == 0 ? "Seu ambiente, ainda por descobrir.\nToque em ESCANEAR para começar." : "Nenhum resultado nesta sessão.\nConfira permissões, Wi-Fi, Bluetooth e localização em Opções.");
         export.setEnabled(engine.startedAt != 0); export.setAlpha(engine.startedAt != 0 ? 1 : .35f);
         moduleSummary.setText(active ? "Módulos em execução · toque para ver disponibilidade" : "Wi-Fi · Bluetooth · Direct · NFC · rede móvel · rede local");
-        radar.update(engine.findings.values());
+        radar.update(visible);
+        HashSet<String> expectedCards = new HashSet<>();
         for (String source : SignalRadarView.ORDER) {
             ArrayList<Finding> items = new ArrayList<>();
-            for (Finding f : engine.findings.values()) if (f.methods.contains(source)) items.add(f);
-            if (items.isEmpty()) continue;
+            for (Finding f : visible) if (f.methods.contains(source)) items.add(f);
             GroupViews group = groups.get(source);
+            if (items.isEmpty()) { if (group != null) group.root.setVisibility(View.GONE); continue; }
             if (group == null) { group = new GroupViews(source); groups.put(source, group); resultList.addView(group.root); }
+            group.root.setVisibility(View.VISIBLE);
             group.counter.setText(String.valueOf(items.size()));
             group.header.setContentDescription(source + ", " + items.size() + " resultados. Toque para " + (group.expanded ? "recolher" : "expandir"));
             int index = 0;
             for (Finding f : items) {
                 if (index++ >= 100) break;
                 String cardKey = source + "|" + f.key;
+                expectedCards.add(cardKey);
                 CardViews views = cards.get(cardKey);
                 if (views == null) {
                     views = new CardViews(f); cards.put(cardKey, views); group.body.addView(views.root);
@@ -274,26 +280,37 @@ public final class MainActivity extends Activity {
             }
             group.more.setVisibility(group.expanded && items.size() > 100 ? View.VISIBLE : View.GONE);
         }
+        Iterator<Map.Entry<String, CardViews>> stale = cards.entrySet().iterator();
+        while (stale.hasNext()) {
+            Map.Entry<String, CardViews> entry = stale.next();
+            if (!expectedCards.contains(entry.getKey())) {
+                View view = entry.getValue().root; view.animate().cancel();
+                if (view.getParent() instanceof ViewGroup) ((ViewGroup)view.getParent()).removeView(view);
+                stale.remove();
+            }
+        }
         radarLegend.setText("Anéis, de fora para dentro: " + String.join(" → ", SignalRadarView.ORDER) + ". Marcador curto = presença sem RSSI.");
     }
 
     private final class GroupViews {
         final LinearLayout root = column(), body = column(), header = row();
-        final TextView counter = text("0", 13, MUTED), arrow = text("⌄", 19, MUTED);
+        final TextView counter = text("0", 13, MUTED);
+        final ChevronView arrow = new ChevronView(MainActivity.this);
         final TextView more = text("Mostrando 100 nesta origem. Todos os resultados guardados estão no relatório.", 10, MUTED);
         boolean expanded = true;
         GroupViews(String source) {
             header.setPadding(dp(14), dp(16), dp(14), dp(16)); header.setBackground(shape(SURFACE, BORDER, 13));
             TextView title = text("●  " + source, 14, SignalRadarView.color(source)); bold(title);
             header.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-            header.addView(counter); LinearLayout.LayoutParams arrowParams = lp(28, -2); arrow.setGravity(Gravity.END); header.addView(arrow, arrowParams);
-            arrow.setRotation(180); root.addView(header, lp(-1, -2)); gap(root, 10); root.addView(body, lp(-1, -2)); root.addView(more); gap(root, 14);
+            header.addView(counter); header.addView(arrow, lp(28, 24));
+            root.addView(header, lp(-1, -2)); gap(root, 10); root.addView(body, lp(-1, -2)); root.addView(more); gap(root, 14);
             header.setFocusable(true); header.setOnClickListener(v -> {
-                android.transition.AutoTransition transition = new android.transition.AutoTransition(); transition.setDuration(230);
+                android.transition.TransitionManager.endTransitions(root);
+                android.transition.AutoTransition transition = new android.transition.AutoTransition(); transition.setDuration(180); transition.excludeTarget(header, true);
                 android.transition.TransitionManager.beginDelayedTransition(root, transition);
                 expanded = !expanded; body.setVisibility(expanded ? View.VISIBLE : View.GONE);
                 more.setVisibility(expanded && Integer.parseInt(counter.getText().toString()) > 100 ? View.VISIBLE : View.GONE);
-                arrow.animate().rotation(expanded ? 180 : 0).setDuration(230).start();
+                arrow.setExpanded(expanded);
                 header.setContentDescription(source + ", " + counter.getText() + " resultados. Toque para " + (expanded ? "recolher" : "expandir"));
             });
         }
@@ -332,22 +349,101 @@ public final class MainActivity extends Activity {
     private void findingDetails(Finding f) {
         StringBuilder identifiers = new StringBuilder();
         for (Map.Entry<String, String> id : f.identifiers.entrySet()) identifiers.append(id.getKey()).append(": ").append(id.getValue()).append("\n");
-        showText(f.name, f.kind + "\n\nEncontrado via " + f.via() + "\n" + f.signal() + "\n" + f.distance()
+        String value = f.kind + "\n\nEncontrado via " + f.via() + "\n" + f.signal() + "\n" + f.distance()
             + "\nDireção: indisponível\n\n" + identifiers + "\n" + f.details + "\n\nID observado: " + f.key
             + "\nPrimeira detecção no app: " + new SimpleDateFormat("HH:mm:ss", Locale.ROOT).format(new Date(f.firstSeen))
             + "\nAtualizações recebidas: " + f.observations
             + "\n\nO nome e a classe são anunciados e não confirmam o modelo ou dono. O sinal depende de paredes, potência e interferência. Um mesmo aparelho pode aparecer por vários sinais."
-            + (f.distanceMeters == null ? "\n\nMetros exigem medição compatível, como Wi-Fi RTT. RSSI sozinho não fornece distância confiável." : "\n\nDistância via Wi-Fi RTT. O valor ± é o desvio padrão informado pelo Android; não inclui todo o erro por obstáculos ou reflexões."));
+            + "\n\n" + capabilities(f)
+            + (f.estimatedMeters() == null ? "\n\nEsta fonte não permite estimar metros pelo sinal disponível."
+                : "\n\nRSSI: modelo experimental com n=2,5 e referência de " + f.reference() + " dBm a 1 m. O erro pode ser grande; não é medição nem intervalo de confiança. Calibre a 1 m de um aparelho conhecido. RTT, quando recente, tem prioridade; ± é o desvio padrão informado pelo Android. Sem direção.") + "\n\n" + f.presence;
+        ScrollView scroller = new ScrollView(this); LinearLayout panel = column(); panel.setPadding(dp(20), dp(12), dp(20), dp(12)); scroller.addView(panel);
+        TextView body = text(value, 12, WHITE); body.setTextIsSelectable(true); panel.addView(body);
+        action(panel, "Copiar identificadores", () -> ((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText(f.name, identifiers.toString())));
+        if (f.key.startsWith("wifi:")) {
+            action(panel, "Conectar pelo Android", () -> openSettings(new Intent(Settings.ACTION_WIFI_SETTINGS)));
+            action(panel, "O que a segurança anunciada permite saber", () -> showText("Segurança de " + f.name, wifiSecurity(f)));
+        } else if (f.key.startsWith("bt:")) {
+            action(panel, "Parear / conectar pelo Android", () -> openSettings(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS)));
+            action(panel, "Compartilhar recado pelo Android", this::shareMessage);
+        } else if (f.key.startsWith("p2p:")) action(panel, "Abrir conexões Wi-Fi Direct", () -> openSettings(new Intent(Settings.ACTION_WIFI_SETTINGS)));
+        else if (f.key.startsWith("cell:")) action(panel, "Configurações da rede móvel", () -> openSettings(new Intent(Settings.ACTION_NETWORK_OPERATOR_SETTINGS)));
+        if (f.key.startsWith("lan:") && (f.identifiers.getOrDefault("Tipo de serviço mDNS", "").startsWith("_http.") || f.identifiers.getOrDefault("Tipo de serviço mDNS", "").startsWith("_https."))) {
+            action(panel, "Abrir serviço web anunciado", () -> openWebService(f));
+        }
+        if (f.estimatedMeters() != null) action(panel, "Calibrar RSSI a 1 metro", () -> calibrate(f));
+        new AlertDialog.Builder(this).setTitle(f.name).setView(scroller).setPositiveButton("Fechar", null).show();
+    }
+
+    private void action(LinearLayout panel, String label, Runnable run) {
+        Button button = new Button(this); button.setAllCaps(false); button.setText(label); panel.addView(button);
+        button.setOnClickListener(v -> run.run());
+    }
+    private String wifiSecurity(Finding f) {
+        String security = f.identifiers.getOrDefault("Segurança anunciada", "Não informada");
+        return "Informação anunciada: " + security + "\n\n"
+            + (security.contains("SAE") ? "Há anúncio de WPA3-Personal/SAE.\n" : "")
+            + (security.contains("PSK") ? "Há anúncio de segurança com chave pré-compartilhada.\n" : "")
+            + (security.contains("EAP") ? "Há anúncio de autenticação empresarial/EAP; pode exigir identidade e certificados.\n" : "")
+            + (security.contains("OWE") ? "Há anúncio de rede aberta com criptografia OWE.\n" : "")
+            + (security.contains("WEP") ? "Há anúncio do protocolo legado WEP. Recomenda-se revisar a configuração no roteador.\n" : "")
+            + "\nO anúncio não contém a senha. SSID, MAC, canal e RSSI não permitem calculá-la. O Android comum deste app não fornece captura de autenticação/modo monitor para auditoria de senhas. Nenhuma senha foi descoberta ou testada.\n\nPara recuperar a senha da sua rede, consulte o compartilhamento da rede salva nas configurações do Android, a etiqueta ou a administração do seu roteador. A disponibilidade depende do sistema.";
+    }
+    private void openWebService(Finding f) {
+        try {
+            String host = f.identifiers.getOrDefault("IP", f.identifiers.get("IPv6"));
+            int port = Integer.parseInt(f.identifiers.get("Porta"));
+            if (host == null || port < 1 || port > 65535) throw new IllegalArgumentException();
+            String scheme = f.identifiers.get("Tipo de serviço mDNS").startsWith("_https.") ? "https" : "http";
+            Uri uri = Uri.parse(new java.net.URI(scheme, null, host, port, "/", null, null).toASCIIString());
+            openSettings(new Intent(Intent.ACTION_VIEW, uri));
+        } catch (Exception e) { Toast.makeText(this, "Aguarde a resolução do IP e da porta do serviço.", Toast.LENGTH_LONG).show(); }
+    }
+    private void shareMessage() {
+        EditText message = new EditText(this); message.setHint("Digite seu recado"); message.setMinLines(3);
+        message.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        message.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(2000)});
+        LinearLayout panel = column(); panel.setPadding(dp(22), dp(12), dp(22), dp(12));
+        panel.addView(text("Cria um arquivo .txt para o compartilhamento do Android. Escolha Bluetooth se disponível e selecione o destino. O receptor precisa aceitar e suportar arquivos; não precisa do Espectro. Detectar um sinal não garante que ele receba arquivos. Este recurso não substitui um serviço de emergência.", 12, MUTED)); panel.addView(message);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Compartilhar recado").setView(panel).setPositiveButton("Escolher destino", null).setNegativeButton("Cancelar", null).create();
+        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            if (message.getText().toString().trim().isEmpty()) { message.setError("Escreva o recado"); return; }
+            try {
+                Uri uri = MessageShareProvider.create(this, message.getText().toString());
+                Intent send = new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, uri)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                send.setClipData(ClipData.newRawUri("Recado Espectro", uri));
+                startActivity(Intent.createChooser(send, "Enviar recado com…")); dialog.dismiss();
+            } catch (IOException | ActivityNotFoundException e) { Toast.makeText(this, "Não foi possível abrir o compartilhamento.", Toast.LENGTH_LONG).show(); }
+        })); dialog.show();
+    }
+    private void calibrate(Finding f) {
+        new AlertDialog.Builder(this).setTitle("Referência a 1 metro")
+            .setMessage("Coloque este celular a 1 m do emissor conhecido, sem obstáculos. Aplicar usa o RSSI suavizado atual como referência. Não altera potência, frequência ou dados do aparelho. A calibração fica só nesta abertura do app.")
+            .setPositiveButton("Usar sinal atual", (d, w) -> {
+                if (f.smoothedRssi == null || f.ageMs() < 0 || f.ageMs() > 15000) Toast.makeText(this, "Aguarde uma leitura de sinal com menos de 15 segundos.", Toast.LENGTH_LONG).show();
+                else { f.calibratedReference = f.smoothedRssi; refresh(); }
+            }).setNeutralButton("Restaurar padrão", (d, w) -> { f.calibratedReference = null; refresh(); }).setNegativeButton("Cancelar", null).show();
+    }
+    private String capabilities(Finding f) {
+        if (f.key.startsWith("wifi:")) return "Wi-Fi: SSID, BSSID, frequência, segurança e RSSI anunciados; RTT se compatível. Conecte com credencial fornecida e confirmação do Android. IP de clientes e senha salva não são transmitidos no anúncio.";
+        if (f.key.startsWith("bt:")) return "Bluetooth: nome/classe, endereço possivelmente aleatório, RSSI e dados/UUIDs BLE anunciados. Pareamento pelo sistema. Recados usam o compartilhamento de arquivo .txt do Android, sem Espectro no destino; exigem suporte a arquivos e aceite. Bluetooth LE sozinho não garante esse suporte. O destinatário é escolhido no Android, não pelo MAC desta ficha.";
+        if (f.key.startsWith("p2p:")) return "Direct: nome, endereço P2P e tipo WPS; lista pode estar em cache, sem RSSI nem direção. Conexão exige suporte e aceite do participante; abra as configurações do Android.";
+        if (f.key.startsWith("lan:")) return "Rede local: nome de serviço, tipo, IP/IPv6, porta e TXT quando anunciados. Não indica distância física; o protocolo anunciado precisa de um aplicativo cliente compatível. Não há comando universal para enviar mensagem.";
+        if (f.key.startsWith("cell:")) return "Rede móvel: tecnologia, operadora, identidade de célula e potência informadas pelo modem. São antenas, não celulares próximos. Não fornece senha, IP/MAC ou canal de mensagem de outros telefones.";
+        if (f.key.startsWith("nfc:")) return "NFC: UID e tecnologias de tags aproximadas. Copie os dados de identificação; esta versão não altera tags. Não há mensagem universal entre celulares por NFC.";
+        return "USB: fabricante, produto, VID/PID e classe; serial apenas quando já autorizado pelo sistema. Leitura/escrita depende do protocolo e de permissão específica. Não identifica aparelhos sem fio.";
     }
 
     private void showMenu() {
-        new AlertDialog.Builder(this).setTitle("Espectro").setItems(new String[]{"Hardware, sensores e disponibilidade", "Registro da sessão", "Permissões do app", "Configurações de conexões", "Atualizações pelo GitHub", "Sobre a identificação"}, (dialog, which) -> {
+        new AlertDialog.Builder(this).setTitle("Espectro").setItems(new String[]{"Hardware, sensores e disponibilidade", "Registro da sessão", "Permissões do app", "Configurações de conexões", "Atualizações pelo GitHub", "Compartilhar recado", "Sobre a identificação"}, (dialog, which) -> {
             if (which == 0) showHardware();
             else if (which == 1) showText("Registro da sessão", String.join("\n", engine.log));
             else if (which == 2) openSettings(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName())));
             else if (which == 3) openSettings(new Intent(Settings.ACTION_WIRELESS_SETTINGS));
             else if (which == 4) showUpdates();
-            else showText("O que o radar observa", "O Espectro mostra os sinais que as APIs públicas do Android permitem acessar.\n\nWi-Fi: pontos de acesso e hotspots; não todos os clientes.\nBluetooth: anúncios BLE e aparelhos em modo visível.\nDirect: participantes visíveis da descoberta P2P.\nNFC: tags por aproximação, a centímetros.\nRede móvel: células da operadora; não celulares de terceiros.\nRede local: nove tipos de serviço mDNS anunciados na rede conectada.\nUSB: periféricos já conectados.\n\nSensores e GNSS fornecem contexto, sem identificar aparelhos ao redor. Infravermelho do celular é emissor. UWB e Wi-Fi Aware exigem participantes compatíveis e não têm varredura universal nesta versão.\n\nMetros são exibidos apenas se Wi-Fi RTT for suportado pelo celular e pelo ponto de acesso. Direção de aparelhos não está disponível.\n\nDados ficam em memória até fechar o app ou iniciar nova sessão. Exportar cria o arquivo no destino escolhido. Ao sair da tela, a varredura para. Sem conta, anúncios, analytics ou servidor.");
+            else if (which == 5) shareMessage();
+            else showText("O que o radar observa", "O Espectro mostra os sinais que as APIs públicas do Android permitem acessar.\n\nWi-Fi: pontos de acesso e hotspots; não todos os clientes.\nBluetooth: anúncios BLE e aparelhos em modo visível.\nDirect: participantes visíveis da descoberta P2P.\nNFC: tags por aproximação, a centímetros.\nRede móvel: células da operadora; não celulares de terceiros.\nRede local: nove tipos de serviço mDNS anunciados na rede conectada.\nUSB: periféricos já conectados.\n\nSensores e GNSS fornecem contexto, sem identificar aparelhos ao redor. Infravermelho do celular é emissor. UWB e Wi-Fi Aware exigem participantes compatíveis e não têm varredura universal nesta versão.\n\nMetros por RSSI em Wi-Fi e Bluetooth são estimativas experimentais; calibre a 1 m de um emissor conhecido. RTT compatível tem prioridade por 60 s. Direção de aparelhos não está disponível.\n\nDados e calibrações ficam em memória até encerrar o processo. Parar e retomar a busca preserva resultados. Exportar cria o arquivo no destino escolhido. Ao sair da tela, a varredura para. Sem conta, anúncios, analytics ou servidor.");
         }).show();
     }
 
