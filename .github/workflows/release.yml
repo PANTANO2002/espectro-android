@@ -1,0 +1,48 @@
+name: Publish signed Android release
+on:
+  push:
+    branches: [main]
+    paths: ['.release/manifest.json']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: espectro-release
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'PANTANO2002/espectro-android' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Test policies, compile source and run Android lint
+        run: |
+          bash scripts/test-update-policy.sh
+          node --test tests/release-preparation.test.mjs
+          chmod +x gradlew
+          ./gradlew assembleDebug lintDebug --no-daemon
+      - name: Decode and verify the locally signed APK
+        run: |
+          node scripts/prepare-release.mjs
+          VERSION=$(node -p "JSON.parse(require('fs').readFileSync('.release/manifest.json','utf8')).versionName")
+          APK="build/release/Espectro-$VERSION.apk"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$APK" > build/release-cert.txt
+          grep -Fx 'Signer #1 certificate SHA-256 digest: 875c853c593129d5054987438102cc25d38ce34853500697c18b32b831d64404' build/release-cert.txt
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" > build/release-badging.txt
+          node --input-type=module -e "import fs from 'node:fs'; const m=JSON.parse(fs.readFileSync('.release/manifest.json','utf8')); const b=fs.readFileSync('build/release-badging.txt','utf8'); if(!b.includes(\"package: name='\"+m.packageName+\"' versionCode='\"+m.versionCode+\"' versionName='\"+m.versionName+\"'\") || !b.includes(\"sdkVersion:'26'\")) throw Error('APK metadata mismatch');"
+          git archive --format=zip --prefix=Espectro-Android/ -o "build/release/Espectro-$VERSION-codigo-fonte.zip" HEAD
+      - name: Publish stable release for the app updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p "JSON.parse(require('fs').readFileSync('.release/manifest.json','utf8')).versionName")
+          gh release create "v$VERSION" "build/release/Espectro-$VERSION.apk" build/release/update.json "build/release/Espectro-$VERSION-codigo-fonte.zip" "build/release/SHA256SUMS-$VERSION.txt" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Espectro $VERSION" --notes-file .release/notes.md --latest
