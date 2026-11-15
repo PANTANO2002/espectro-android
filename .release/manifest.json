@@ -1,0 +1,8 @@
+{
+  "versionName": "0.3.1",
+  "apkName": "Espectro-0.3.1.apk",
+  "versionCode": 4,
+  "packageName": "br.com.espectro",
+  "minSdk": 26,
+  "sha256": "8bd0145435f77b5e6ef589145d143b631617970da1d4df21060ade01d720b950"
+}
