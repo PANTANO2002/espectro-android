@@ -6,3 +6,7 @@ New-Item -ItemType Directory -Force -Path $taskClasses | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Falha ao compilar os testes' }
 & java -cp $taskClasses br.com.espectro.UpdatePolicyTest
 if ($LASTEXITCODE -ne 0) { throw 'Falha nos testes da política de atualização' }
+& javac -encoding UTF-8 -d $taskClasses (Join-Path $taskProject 'app/src/main/java/br/com/espectro/SignalPolicy.java') (Join-Path $taskProject 'tests/SignalPolicyTest.java')
+if ($LASTEXITCODE -ne 0) { throw 'Falha ao compilar os testes de sinais' }
+& java -cp $taskClasses br.com.espectro.SignalPolicyTest
+if ($LASTEXITCODE -ne 0) { throw 'Falha nos testes da política de sinais' }
